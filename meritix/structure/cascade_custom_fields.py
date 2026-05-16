@@ -418,8 +418,22 @@ def _bulk_refill(target_doctype: str, organization_filter: list[str] | None = No
 		where_extra = f" AND rec.organization IN ({placeholders})"
 		filter_params = tuple(organization_filter)
 
+	# Verify which columns actually exist on the DB table before running
+	# UPDATEs so a missing column doesn't abort the entire loop.
+	existing_columns = {
+		row.column_name
+		for row in frappe.db.sql(
+			"SELECT column_name FROM information_schema.columns WHERE table_name=%s",
+			(f"tab{target_doctype}",),
+			as_dict=True,
+		)
+	}
+
 	for pair in pairs:
 		fieldname = fieldname_for(pair.label)
+
+		if fieldname not in existing_columns:
+			continue
 
 		# First NULL-out the field for all affected records so stale
 		# values from a previous tree position are cleared.
@@ -620,6 +634,14 @@ def sync_app() -> None:
 	Wired to ``after_install`` and ``after_migrate`` in hooks.py.
 	"""
 	_backfill_legacy_position_targets()
+
+	# Rebuild the Organization Nested Set so lft/rgt values are correct
+	# before the cascade queries rely on them.
+	try:
+		frappe.utils.nestedset.rebuild_tree("Organization", "parent_organization")
+	except Exception:
+		pass
+
 	sync_all()
 	for target_doctype in target_doctypes():
 		refill_all_for(target_doctype)
