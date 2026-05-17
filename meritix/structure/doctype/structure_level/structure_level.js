@@ -9,6 +9,21 @@ frappe.ui.form.on("Structure Level", {
 				_load_insert_after_options(frm, row);
 			}
 		});
+
+		// Reload options when the user focuses the insert_after cell in the
+		// grid (inline editing creates a fresh Autocomplete control that
+		// doesn't carry the previously loaded options).
+		frm.fields_dict.applies_to.grid.wrapper
+			.off("focus.insert_after")
+			.on("focus.insert_after", ".frappe-control[data-fieldname='insert_after'] input", function () {
+				let $row = $(this).closest(".rows .frappe-control").closest("[data-name]");
+				let row_name = $row.data("name");
+				if (!row_name) return;
+				let row = locals["Structure DF Creation"][row_name];
+				if (row && row.target_doctype) {
+					_load_insert_after_options(frm, row);
+				}
+			});
 	}
 });
 
@@ -45,6 +60,10 @@ function _set_insert_after_options(frm, row, options) {
 		let field = grid_row.get_field("insert_after");
 		if (field) {
 			field.set_data(options);
+			// Re-evaluate so the dropdown appears immediately after data is set
+			if (field.awesomplete) {
+				field.awesomplete.evaluate();
+			}
 		}
 	}
 }
