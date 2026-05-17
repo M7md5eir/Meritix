@@ -4,13 +4,13 @@
 """Manage per-Structure Level Custom Fields on any target DocType.
 
 Each Structure Level record (Company, BU, Sub BU, Sector, ...) may opt to
-materialise as a read-only ``Link to Organization`` Custom Field on
-one or more target DocTypes -- declared via the ``Structure Level.applies_to``
-child table. Each row in ``applies_to`` carries the target DocType, an
-explicit ``insert_after`` anchor, and per-row visibility flags
-(``hidden``, ``in_list_view``, ``in_standard_filter``, ``print_hide``).
+materialise as a read-only ``Data`` Custom Field on one or more target
+DocTypes -- declared via the ``Structure Level.applies_to`` child table.
+Each row in ``applies_to`` carries the target DocType, an explicit
+``insert_after`` anchor, and per-row visibility flags (``hidden``,
+``in_list_view``, ``in_standard_filter``, ``print_hide``).
 The cascade walks up the Organization tree and populates each
-per-Structure-Level field by level.
+per-Structure-Level field with the Organization's display name.
 
 Public surface:
     ensure(structure_doc, target_row)  -- create/update one CF.
@@ -34,8 +34,6 @@ Whitelisted endpoints (used by the Structure Level form):
 """
 
 from __future__ import annotations
-
-import json
 
 import frappe
 from frappe.custom.doctype.custom_field.custom_field import create_custom_field
@@ -138,18 +136,6 @@ def _flags_from_row(row, target_doctype: str) -> dict:
 	}
 
 
-def _link_filters_for_structure(structure_name: str) -> str:
-	"""Restrict the picker / standard-filter to Organizations of this Structure Level.
-
-	Frappe's Link control reads ``link_filters`` (JSON) on the field and
-	applies it to both the form picker and the list-view standard filter.
-	We pin to the Structure Level's autoname (e.g. ``STR-000002``) because
-	``Organization.structure`` stores the link target, not the user-facing
-	label.
-	"""
-	return json.dumps([["Organization", "structure", "=", structure_name]])
-
-
 def _field_definition(
 	target_doctype: str,
 	structure_label: str,
@@ -159,7 +145,7 @@ def _field_definition(
 	return {
 		"fieldname": fieldname_for(structure_label),
 		"label": structure_label,
-		"fieldtype": "Link",
+		"fieldtype": "Data",
 		"options": "Organization",
 		"read_only": 1,
 		"hidden": flags["hidden"],
@@ -168,28 +154,44 @@ def _field_definition(
 		"print_hide": flags["print_hide"],
 		"insert_after": flags["insert_after"],
 		"is_system_generated": 1,
-		"link_filters": _link_filters_for_structure(structure_name),
 	}
 
 
 def _apply_df(cf, df) -> None:
-	"""Update mutable Custom Field attributes from ``df`` in place."""
+	"""Update mutable Custom Field attributes from ``df`` in place.
+
+	Frappe blocks fieldtype changes on existing Custom Fields, so when
+	migrating (e.g. Link → Data) we delete the old CF and recreate it.
+	"""
+	if cf.get("fieldtype") != df.get("fieldtype"):
+		target_doctype = cf.dt
+		desired_name = cf.name
+		cf.delete(ignore_permissions=True)
+		create_custom_field(target_doctype, df, is_system_generated=True)
+		autoname = _autonamed_cf_name(target_doctype, df["fieldname"])
+		if autoname != desired_name and frappe.db.exists("Custom Field", autoname):
+			frappe.rename_doc("Custom Field", autoname, desired_name, force=True, show_alert=False)
+		frappe.clear_cache(doctype=target_doctype)
+		return
+
 	dirty = False
 	for key in (
 		"label",
 		"insert_after",
-		"fieldtype",
 		"options",
 		"hidden",
 		"read_only",
 		"in_list_view",
 		"in_standard_filter",
 		"print_hide",
-		"link_filters",
 	):
-		if cf.get(key) != df[key]:
-			cf.set(key, df[key])
+		if cf.get(key) != df.get(key):
+			cf.set(key, df.get(key))
 			dirty = True
+	# Clear link_filters when migrating from Link to Data.
+	if cf.get("link_filters"):
+		cf.set("link_filters", None)
+		dirty = True
 	if dirty:
 		cf.save(ignore_permissions=True)
 
@@ -447,7 +449,7 @@ def _bulk_refill(target_doctype: str, organization_filter: list[str] | None = No
 			INNER JOIN `tabOrganization` ancestor
 				ON ancestor.lft <= leaf.lft AND ancestor.rgt >= leaf.rgt
 				AND ancestor.structure = %s
-			SET rec.`{fieldname}` = ancestor.name
+			SET rec.`{fieldname}` = ancestor.organization
 			WHERE 1=1{where_extra}
 		"""
 		frappe.db.sql(update_sql, (pair.structure_name, *filter_params))
@@ -488,7 +490,7 @@ def _get_organization_ancestry(organization: str) -> list[dict]:
 
 	return frappe.db.sql(
 		"""
-		SELECT o.name, o.structure,
+		SELECT o.name, o.organization AS organization_title, o.structure,
 		       s.structure AS structure_label
 		FROM `tabOrganization` o
 		LEFT JOIN `tabStructure Level` s ON s.name = o.structure
@@ -523,7 +525,7 @@ def fill(doc, target_doctype: str) -> None:
 			continue
 		fieldname = fieldname_for(structure_label)
 		if fieldname in target_fields and hasattr(doc, fieldname):
-			doc.set(fieldname, node["name"])
+			doc.set(fieldname, node.get("organization_title") or node["name"])
 
 
 def fill_on_save(doc, method=None):
